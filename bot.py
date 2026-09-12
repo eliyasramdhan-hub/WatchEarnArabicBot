@@ -50,12 +50,20 @@ async def db_user(uid, name=""):
 
 async def db_balance(uid):
     async with pool.acquire() as c:
-        r = await c.fetchrow("SELECT balance FROM users WHERE user_id=$1", uid)
-        return float(r["balance"]) if r else 0.0
+        r = await c.fetchrow("SELECT balance, referrals FROM users WHERE user_id=$1", uid)
+        return (float(r["balance"]), int(r["referrals"])) if r else (0.0, 0)
 
 async def db_top():
     async with pool.acquire() as c:
         return await c.fetch("SELECT username,balance FROM users ORDER BY balance DESC LIMIT 10")
+
+async def db_rank(uid):
+    async with pool.acquire() as c:
+        r = await c.fetchrow("""
+            SELECT COUNT(*) + 1 AS rank FROM users 
+            WHERE balance > (SELECT balance FROM users WHERE user_id=$1)
+        """, uid)
+        return int(r["rank"]) if r else 0
 
 # ============== التوقيع ==============
 def sign(uid, tx, amount):
@@ -75,7 +83,7 @@ def health():
 
 @app.route("/telegram", methods=["POST"])
 async def telegram_webhook():
-    await init_db()  # مهم: تهيئة pool داخل حلقة الأحداث الصحيحة
+    await init_db()
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, router))
@@ -129,44 +137,100 @@ async def set_webhook():
     await application.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
     return f"Webhook set to {webhook_url}", 200
 
+# ============== لوحة المفاتيح ==============
+def main_keyboard():
+    kb = [
+        ["المهام", "رصيدي"],
+        ["دعوة الأصدقاء", "السحب"],
+        ["المتصدرون", "الدعم"]
+    ]
+    return ReplyKeyboardMarkup(kb, resize_keyboard=True)
+
 # ============== معالجات البوت ==============
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await init_db()
-    u = update.effective_user
-    await db_user(u.id, u.username or "")
-    kb = [["🎬 المهام", "💰 رصيدي"], ["👥 دعوة الأصدقاء", "💸 السحب"], ["🏆 المتصدرون", "📞 الدعم"]]
-    await update.message.reply_text(
-        "أهلاً بك في شاهد واربح 💰\nاختر من القائمة:",
-        reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True)
-    )
+    try:
+        await init_db()
+        u = update.effective_user
+        await db_user(u.id, u.username or "")
+        name = u.first_name or "صديقي"
+        await update.message.reply_text(
+            f"مرحباً {name} في شاهد واربح 💰\n\n"
+            f"هنا يمكنك كسب النقود عبر إكمال المهام والعروض.\n"
+            f"كل مهمة تكملها تضيف رصيداً إلى حسابك.\n\n"
+            f"اختر من الأزرار أدناه:",
+            reply_markup=main_keyboard()
+        )
+    except Exception as e:
+        await update.message.reply_text(f"خطأ: {str(e)}")
 
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await init_db()
-    u = update.effective_user
-    await db_user(u.id, u.username or "")
-    t = update.message.text
+    try:
+        await init_db()
+        u = update.effective_user
+        await db_user(u.id, u.username or "")
+        t = update.message.text
 
-    if t == "🎬 المهام":
-        if not (OW_PUBLIC and OW_SECRET):
-            await update.message.reply_text("⚠️ المهام قيد الإعداد حالياً.")
-            return
-        await update.message.reply_text(
-            "🎬 اختر مهمة وأكملها، وبعد التأكيد يُضاف الرصيد تلقائياً.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎯 المهام والعروض", url=wall(u.id))]])
-        )
-    elif t == "💰 رصيدي":
-        b = await db_balance(u.id)
-        await update.message.reply_text(f"💰 رصيدك: {b:g} نقطة")
-    elif t == "👥 دعوة الأصدقاء":
-        await update.message.reply_text(f"👥 رابط دعوتك:\nhttps://t.me/WatchEarnArabicBot?start={u.id}")
-    elif t == "💸 السحب":
-        await update.message.reply_text("💸 السحب عبر Sham Cash.\nأرسل طلبك للدعم.")
-    elif t == "🏆 المتصدرون":
-        rows = await db_top()
-        s = "🏆 المتصدرون:\n" + "".join(
-            f"{i}. @{r['username'] or 'مستخدم'} — {float(r['balance']):g}\n"
-            for i, r in enumerate(rows, 1)
-        )
-        await update.message.reply_text(s)
-    elif t == "📞 الدعم":
-        await update.message.reply_text("📞 للدعم: تواصل مع الإدارة.")
+        # ========== المهام ==========
+        if t == "المهام":
+            if not (OW_PUBLIC and OW_SECRET):
+                await update.message.reply_text("المهام قيد الإعداد حالياً.")
+                return
+            await update.message.reply_text(
+                "اختر مهمة وأكملها، وبعد التأكيد يُضاف الرصيد تلقائياً.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("فتح المهام والعروض", url=wall(u.id))
+                ]])
+            )
+
+        # ========== رصيدي ==========
+        elif t == "رصيدي":
+            bal, refs = await db_balance(u.id)
+            rank = await db_rank(u.id)
+            await update.message.reply_text(
+                f"💰 رصيدك الحالي: {bal:g} نقطة\n"
+                f"👥 عدد إحالاتك: {refs}\n"
+                f"🏆 ترتيبك: {rank}"
+            )
+
+        # ========== دعوة الأصدقاء ==========
+        elif t == "دعوة الأصدقاء":
+            link = f"https://t.me/WatchEarnArabicBot?start={u.id}"
+            await update.message.reply_text(
+                f"👥 رابط دعوتك الخاص:\n\n{link}\n\n"
+                f"شارك الرابط مع أصدقائك، واحصل على نقاط عند انضمامهم."
+            )
+
+        # ========== السحب ==========
+        elif t == "السحب":
+            bal, _ = await db_balance(u.id)
+            await update.message.reply_text(
+                f"💸 السحب عبر Sham Cash.\n\n"
+                f"الحد الأدنى للسحب: 5,000 نقطة\n"
+                f"رصيدك الحالي: {bal:g} نقطة\n\n"
+                f"لطلب السحب، تواصل مع الإدارة."
+            )
+
+        # ========== المتصدرون ==========
+        elif t == "المتصدرون":
+            rows = await db_top()
+            if not rows:
+                await update.message.reply_text("لا يوجد متصدرون بعد.")
+                return
+            s = "🏆 قائمة المتصدرين:\n\n"
+            for i, r in enumerate(rows, 1):
+                name = f"@{r['username']}" if r['username'] else "مستخدم"
+                s += f"{i}. {name} — {float(r['balance']):g}\n"
+            await update.message.reply_text(s)
+
+        # ========== الدعم ==========
+        elif t == "الدعم":
+            await update.message.reply_text(
+                "📞 للدعم والاستفسارات:\n\n"
+                f"تواصل مع الإدارة مباشرة."
+            )
+
+        else:
+            await update.message.reply_text("اختر من الأزرار أدناه:", reply_markup=main_keyboard())
+
+    except Exception as e:
+        await update.message.reply_text(f"حدث خطأ: {str(e)}")
