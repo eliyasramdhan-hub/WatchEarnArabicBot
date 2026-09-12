@@ -17,25 +17,27 @@ pool = None
 # ============== قاعدة البيانات ==============
 async def init_db():
     global pool
-    pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
-    async with pool.acquire() as c:
-        await c.execute("""
-            CREATE TABLE IF NOT EXISTS users(
-                user_id BIGINT PRIMARY KEY,
-                username TEXT,
-                balance REAL DEFAULT 0,
-                referrals INTEGER DEFAULT 0
-            )
-        """)
-        await c.execute("""
-            CREATE TABLE IF NOT EXISTS transactions(
-                tx_id TEXT PRIMARY KEY,
-                user_id BIGINT,
-                amount REAL,
-                status TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+    if pool is None:
+        pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+        async with pool.acquire() as c:
+            await c.execute("""
+                CREATE TABLE IF NOT EXISTS users(
+                    user_id BIGINT PRIMARY KEY,
+                    username TEXT,
+                    balance REAL DEFAULT 0,
+                    referrals INTEGER DEFAULT 0
+                )
+            """)
+            await c.execute("""
+                CREATE TABLE IF NOT EXISTS transactions(
+                    tx_id TEXT PRIMARY KEY,
+                    user_id BIGINT,
+                    amount REAL,
+                    status TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+    return pool
 
 async def db_user(uid, name=""):
     async with pool.acquire() as c:
@@ -73,6 +75,7 @@ def health():
 
 @app.route("/telegram", methods=["POST"])
 async def telegram_webhook():
+    await init_db()  # مهم: تهيئة pool داخل حلقة الأحداث الصحيحة
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, router))
@@ -83,6 +86,7 @@ async def telegram_webhook():
 
 @app.get("/offerwall/callback")
 async def callback():
+    await init_db()
     uid = request.args.get("user", "")
     amount = request.args.get("amount", "")
     tx = request.args.get("tx", "")
@@ -127,6 +131,7 @@ async def set_webhook():
 
 # ============== معالجات البوت ==============
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await init_db()
     u = update.effective_user
     await db_user(u.id, u.username or "")
     kb = [["🎬 المهام", "💰 رصيدي"], ["👥 دعوة الأصدقاء", "💸 السحب"], ["🏆 المتصدرون", "📞 الدعم"]]
@@ -136,6 +141,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await init_db()
     u = update.effective_user
     await db_user(u.id, u.username or "")
     t = update.message.text
