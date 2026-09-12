@@ -12,14 +12,15 @@ OW_SECRET = os.getenv("OFFERWALL_SECRET", "")
 RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "https://watch-earn-arabic.onrender.com")
 
 app = Flask(__name__)
-pool = None
 
 # ============== قاعدة البيانات ==============
-async def init_db():
-    global pool
-    if pool is None:
-        pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
-        async with pool.acquire() as c:
+_pool = None
+
+async def get_pool():
+    global _pool
+    if _pool is None:
+        _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+        async with _pool.acquire() as c:
             await c.execute("""
                 CREATE TABLE IF NOT EXISTS users(
                     user_id BIGINT PRIMARY KEY,
@@ -37,10 +38,11 @@ async def init_db():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-    return pool
+    return _pool
 
 async def db_user(uid, name=""):
-    async with pool.acquire() as c:
+    p = await get_pool()
+    async with p.acquire() as c:
         await c.execute(
             "INSERT INTO users(user_id,username) VALUES($1,$2) ON CONFLICT(user_id) DO NOTHING",
             uid, name
@@ -49,16 +51,19 @@ async def db_user(uid, name=""):
             await c.execute("UPDATE users SET username=$1 WHERE user_id=$2", name, uid)
 
 async def db_balance(uid):
-    async with pool.acquire() as c:
+    p = await get_pool()
+    async with p.acquire() as c:
         r = await c.fetchrow("SELECT balance, referrals FROM users WHERE user_id=$1", uid)
         return (float(r["balance"]), int(r["referrals"])) if r else (0.0, 0)
 
 async def db_top():
-    async with pool.acquire() as c:
+    p = await get_pool()
+    async with p.acquire() as c:
         return await c.fetch("SELECT username,balance FROM users ORDER BY balance DESC LIMIT 10")
 
 async def db_rank(uid):
-    async with pool.acquire() as c:
+    p = await get_pool()
+    async with p.acquire() as c:
         r = await c.fetchrow("""
             SELECT COUNT(*) + 1 AS rank FROM users 
             WHERE balance > (SELECT balance FROM users WHERE user_id=$1)
@@ -72,6 +77,17 @@ def sign(uid, tx, amount):
 def wall(uid):
     return f"https://offerwall.gg/wall/{OW_PUBLIC}?userId={uid}&signature={sign(str(uid),'','')}"
 
+# ============== Application واحد مشترك ==============
+_bot_app = None
+
+def get_bot_app():
+    global _bot_app
+    if _bot_app is None:
+        _bot_app = Application.builder().token(BOT_TOKEN).build()
+        _bot_app.add_handler(CommandHandler("start", start))
+        _bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, router))
+    return _bot_app
+
 # ============== Flask Routes ==============
 @app.get("/")
 def home():
@@ -83,18 +99,16 @@ def health():
 
 @app.route("/telegram", methods=["POST"])
 async def telegram_webhook():
-    await init_db()
-    application = Application.builder().token(BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, router))
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    await application.initialize()
-    await application.process_update(update)
+    bot_app = get_bot_app()
+    if not bot_app.is_initialized:
+        await bot_app.initialize()
+    update = Update.de_json(request.get_json(force=True), bot_app.bot)
+    await bot_app.process_update(update)
     return "OK", 200
 
 @app.get("/offerwall/callback")
 async def callback():
-    await init_db()
+    p = await get_pool()
     uid = request.args.get("user", "")
     amount = request.args.get("amount", "")
     tx = request.args.get("tx", "")
@@ -112,7 +126,7 @@ async def callback():
     if not hmac.compare_digest(sign(uid, tx, amount), sig):
         return "invalid signature", 403
 
-    async with pool.acquire() as c:
+    async with p.acquire() as c:
         exists = await c.fetchrow("SELECT 1 FROM transactions WHERE tx_id=$1", tx)
         if exists:
             return "OK", 200
@@ -130,13 +144,6 @@ async def callback():
         )
     return "OK", 200
 
-@app.get("/setwebhook")
-async def set_webhook():
-    application = Application.builder().token(BOT_TOKEN).build()
-    webhook_url = f"{RENDER_URL}/telegram"
-    await application.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
-    return f"Webhook set to {webhook_url}", 200
-
 # ============== لوحة المفاتيح ==============
 def main_keyboard():
     kb = [
@@ -149,7 +156,6 @@ def main_keyboard():
 # ============== معالجات البوت ==============
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        await init_db()
         u = update.effective_user
         await db_user(u.id, u.username or "")
         name = u.first_name or "صديقي"
@@ -165,12 +171,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        await init_db()
         u = update.effective_user
         await db_user(u.id, u.username or "")
         t = update.message.text
 
-        # ========== المهام ==========
         if t == "المهام":
             if not (OW_PUBLIC and OW_SECRET):
                 await update.message.reply_text("المهام قيد الإعداد حالياً.")
@@ -181,8 +185,6 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     InlineKeyboardButton("فتح المهام والعروض", url=wall(u.id))
                 ]])
             )
-
-        # ========== رصيدي ==========
         elif t == "رصيدي":
             bal, refs = await db_balance(u.id)
             rank = await db_rank(u.id)
@@ -191,16 +193,12 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"👥 عدد إحالاتك: {refs}\n"
                 f"🏆 ترتيبك: {rank}"
             )
-
-        # ========== دعوة الأصدقاء ==========
         elif t == "دعوة الأصدقاء":
             link = f"https://t.me/WatchEarnArabicBot?start={u.id}"
             await update.message.reply_text(
                 f"👥 رابط دعوتك الخاص:\n\n{link}\n\n"
-                f"شارك الرابط مع أصدقائك، واحصل على نقاط عند انضمامهم."
+                f"شارك الرابط مع أصدقائك."
             )
-
-        # ========== السحب ==========
         elif t == "السحب":
             bal, _ = await db_balance(u.id)
             await update.message.reply_text(
@@ -209,8 +207,6 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"رصيدك الحالي: {bal:g} نقطة\n\n"
                 f"لطلب السحب، تواصل مع الإدارة."
             )
-
-        # ========== المتصدرون ==========
         elif t == "المتصدرون":
             rows = await db_top()
             if not rows:
@@ -221,14 +217,10 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 name = f"@{r['username']}" if r['username'] else "مستخدم"
                 s += f"{i}. {name} — {float(r['balance']):g}\n"
             await update.message.reply_text(s)
-
-        # ========== الدعم ==========
         elif t == "الدعم":
             await update.message.reply_text(
-                "📞 للدعم والاستفسارات:\n\n"
-                f"تواصل مع الإدارة مباشرة."
+                "📞 للدعم والاستفسارات:\n\nتواصل مع الإدارة مباشرة."
             )
-
         else:
             await update.message.reply_text("اختر من الأزرار أدناه:", reply_markup=main_keyboard())
 
