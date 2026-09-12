@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: watch-earn-arabic
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn wsgi:application
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: OFFERWALL_PUBLIC_KEY
+        sync: false
+      - key: OFFERWALL_SECRET
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: watch-earn-db
+          property: connectionString
+
+databases:
+  - name: watch-earn-db
+    plan: free
+    databaseName: watch_earn
+    user: watch_earn_user
