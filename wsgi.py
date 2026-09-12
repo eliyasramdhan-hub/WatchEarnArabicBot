@@ -1,12 +1,12 @@
 import asyncio
 from bot import app, init_db
 
-try:
-    loop = asyncio.get_event_loop()
-except RuntimeError:
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+# إنشاء حلقة أحداث جديدة وتثبيتها
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
 
+# تهيئة قاعدة البيانات في نفس الحلقة
 loop.run_until_complete(init_db())
 
+# ربط Flask بالحلقة
 application = app
