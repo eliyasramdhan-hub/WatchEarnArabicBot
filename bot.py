@@ -118,12 +118,19 @@ def health():
 @app.route("/telegram", methods=["POST"])
 def telegram_webhook():
     try:
-        bot_app = run_async(_init_bot())
-        update = Update.de_json(request.get_json(force=True), bot_app.bot)
-        run_async(bot_app.process_update(update))
+        data = request.get_json(force=True)
+        asyncio.run_coroutine_threadsafe(_process_update(data), _loop)
         return "OK", 200
     except Exception as e:
         return f"Error: {str(e)}", 500
+
+async def _process_update(data):
+    try:
+        bot_app = await _init_bot()
+        update = Update.de_json(data, bot_app.bot)
+        await bot_app.process_update(update)
+    except Exception as e:
+        print(f"Error processing update: {e}")
 
 @app.get("/offerwall/callback")
 def callback():
@@ -145,7 +152,7 @@ def callback():
         if not hmac.compare_digest(sign(uid, tx, amount), sig):
             return "invalid signature", 403
 
-        run_async(_handle_callback(uid, amount, tx, status))
+        asyncio.run_coroutine_threadsafe(_handle_callback(uid, amount, tx, status), _loop)
         return "OK", 200
     except Exception as e:
         return f"Error: {str(e)}", 500
@@ -168,6 +175,19 @@ async def _handle_callback(uid, amount, tx, status):
             "UPDATE users SET balance=balance+$1 WHERE user_id=$2",
             float(amount), int(uid)
         )
+
+@app.get("/setwebhook")
+def set_webhook():
+    async def _do():
+        application = Application.builder().token(BOT_TOKEN).build()
+        webhook_url = f"{RENDER_URL}/telegram"
+        await application.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+        return webhook_url
+    try:
+        url = run_async(_do())
+        return f"Webhook set to {url}", 200
+    except Exception as e:
+        return f"Error: {str(e)}", 500
 
 # ============== لوحة المفاتيح ==============
 def main_keyboard():
