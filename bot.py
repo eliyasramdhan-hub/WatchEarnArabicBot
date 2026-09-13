@@ -100,7 +100,7 @@ def health():
 @app.route("/telegram", methods=["POST"])
 async def telegram_webhook():
     bot_app = get_bot_app()
-    if not bot_app.is_initialized:
+    if not bot_app.initialized:          # ← التصحيح هنا
         await bot_app.initialize()
     update = Update.de_json(request.get_json(force=True), bot_app.bot)
     await bot_app.process_update(update)
