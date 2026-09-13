@@ -16,14 +16,11 @@ app = Flask(__name__)
 # ============== حلقة أحداث دائمة ==============
 _loop = asyncio.new_event_loop()
 
-def start_loop(loop):
+def _start_loop(loop):
     asyncio.set_event_loop(loop)
     loop.run_forever()
 
-threading.Thread(target=start_loop, args=(_loop,), daemon=True).start()
-
-def run_async(coro):
-    return asyncio.run_coroutine_threadsafe(coro, _loop).result()
+threading.Thread(target=_start_loop, args=(_loop,), daemon=True).start()
 
 # ============== قاعدة البيانات ==============
 _pool = None
@@ -76,10 +73,10 @@ async def _db_top():
 async def _db_rank(uid):
     p = await _get_pool()
     async with p.acquire() as c:
-        r = await c.fetchrow("""
-            SELECT COUNT(*) + 1 AS rank FROM users 
-            WHERE balance > (SELECT balance FROM users WHERE user_id=$1)
-        """, uid)
+        r = await c.fetchrow(
+            "SELECT COUNT(*) + 1 AS rank FROM users WHERE balance > (SELECT balance FROM users WHERE user_id=$1)",
+            uid
+        )
         return int(r["rank"]) if r else 0
 
 # ============== التوقيع ==============
@@ -89,10 +86,10 @@ def sign(uid, tx, amount):
 def wall(uid):
     return f"https://offerwall.gg/wall/{OW_PUBLIC}?userId={uid}&signature={sign(str(uid),'','')}"
 
-# ============== Application ==============
+# ============== Application مشترك ==============
 _bot_app = None
 
-def get_bot_app():
+def _get_bot_app():
     global _bot_app
     if _bot_app is None:
         _bot_app = Application.builder().token(BOT_TOKEN).build()
@@ -100,8 +97,8 @@ def get_bot_app():
         _bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, router))
     return _bot_app
 
-async def _init_bot():
-    bot_app = get_bot_app()
+async def _ensure_init():
+    bot_app = _get_bot_app()
     if not bot_app.initialized:
         await bot_app.initialize()
     return bot_app
@@ -119,6 +116,7 @@ def health():
 def telegram_webhook():
     try:
         data = request.get_json(force=True)
+        # معالجة الطلب في الخلفية دون إبطاء الاستجابة لـ Telegram
         asyncio.run_coroutine_threadsafe(_process_update(data), _loop)
         return "OK", 200
     except Exception as e:
@@ -126,7 +124,7 @@ def telegram_webhook():
 
 async def _process_update(data):
     try:
-        bot_app = await _init_bot()
+        bot_app = await _ensure_init()
         update = Update.de_json(data, bot_app.bot)
         await bot_app.process_update(update)
     except Exception as e:
@@ -175,19 +173,6 @@ async def _handle_callback(uid, amount, tx, status):
             "UPDATE users SET balance=balance+$1 WHERE user_id=$2",
             float(amount), int(uid)
         )
-
-@app.get("/setwebhook")
-def set_webhook():
-    async def _do():
-        application = Application.builder().token(BOT_TOKEN).build()
-        webhook_url = f"{RENDER_URL}/telegram"
-        await application.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
-        return webhook_url
-    try:
-        url = run_async(_do())
-        return f"Webhook set to {url}", 200
-    except Exception as e:
-        return f"Error: {str(e)}", 500
 
 # ============== لوحة المفاتيح ==============
 def main_keyboard():
@@ -239,9 +224,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🏆 ترتيبك: {rank}"
             )
         elif t == "دعوة الأصدقاء":
-            link = f"https://t.me/WatchEarnArabicBot?start={u.id}"
             await update.message.reply_text(
-                f"👥 رابط دعوتك الخاص:\n\n{link}\n\n"
+                f"👥 رابط دعوتك الخاص:\n\nhttps://t.me/WatchEarnArabicBot?start={u.id}\n\n"
                 f"شارك الرابط مع أصدقائك."
             )
         elif t == "السحب":
@@ -263,11 +247,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 s += f"{i}. {name} — {float(r['balance']):g}\n"
             await update.message.reply_text(s)
         elif t == "الدعم":
-            await update.message.reply_text(
-                "📞 للدعم والاستفسارات:\n\nتواصل مع الإدارة مباشرة."
-            )
+            await update.message.reply_text("📞 للدعم: تواصل مع الإدارة مباشرة.")
         else:
             await update.message.reply_text("اختر من الأزرار أدناه:", reply_markup=main_keyboard())
-
     except Exception as e:
         await update.message.reply_text(f"حدث خطأ: {str(e)}")
